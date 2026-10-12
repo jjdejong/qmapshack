@@ -58,6 +58,7 @@ class IDevice : public IWksItem {
 
   void insertCopyOfProject(IGisProject* project, int& lastResult);
   void updateProject(IGisProject* project);
+  virtual bool supportsAutoSync() const { return true; }
 
   virtual void startSavingProject(IGisProject* project) {}
   virtual void saveImages(CGisItemWpt& wpt) {}

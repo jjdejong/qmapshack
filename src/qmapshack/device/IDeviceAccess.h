@@ -22,6 +22,8 @@
 #include <qdir.h>
 #include <qobject.h>
 
+#include <functional>
+
 /**
  * @brief The abstract (MTP) access for different systems (KDE, GTK,...)
  */
@@ -79,6 +81,15 @@ class IDeviceAccess : public QObject {
    * @return
    */
   virtual QStringList listDirsOnStorage(const QString& path) = 0;
+
+  virtual bool isReadOnly() const { return false; }
+  virtual bool supportsAsyncReads() const { return false; }
+  virtual bool supportsAutoSync() const { return true; }
+  virtual bool requiresUploadConfirmation() const { return false; }
+  virtual QString lastError() const { return {}; }
+  virtual void cancelPendingReads() {}
+  virtual void readFileFromStorageAsync(const QString& path, QObject* receiver,
+                                        std::function<void(const QByteArray&)> callback);
 
  protected:
   QDir dir;

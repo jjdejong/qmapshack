@@ -10,6 +10,7 @@ V1.XX.X
 [QMS-1276] macOS build scripts maintenance
 [QMS-1278] More macOS build scripts maintenance
 [QMS-1281] Support Mapsforge POI files of version 3 and 4
+[QMS-1284] Native Garmin MTP import and safe GPX upload on macOS
 
 V1.21.1
 [QMS-1212] Update macOS build scripts

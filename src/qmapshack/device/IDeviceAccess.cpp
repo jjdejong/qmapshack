@@ -18,4 +18,17 @@
 
 #include "IDeviceAccess.h"
 
-IDeviceAccess::IDeviceAccess(QObject *parent) : QObject(parent) {}
+#include <QTemporaryFile>
+
+IDeviceAccess::IDeviceAccess(QObject* parent) : QObject(parent) {}
+
+void IDeviceAccess::readFileFromStorageAsync(const QString& path, QObject* receiver,
+                                             std::function<void(const QByteArray&)> callback) {
+  QTemporaryFile file;
+  QByteArray contents;
+  if (readFileFromStorage(path, file) && file.open()) {
+    contents = file.readAll();
+  }
+  QMetaObject::invokeMethod(
+      receiver, [callback = std::move(callback), contents]() { callback(contents); }, Qt::QueuedConnection);
+}

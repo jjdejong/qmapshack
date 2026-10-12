@@ -1502,7 +1502,7 @@ void CGisListWks::slotAutoSyncProject(bool yes) {
   if (project != nullptr) {
     project->setAutoSyncToDev(yes);
     if (yes) {
-      syncPrjToDevices(project, getAllDeviceKeys());
+      syncPrjToDevices(project, getAllDeviceKeys(), true);
     }
   }
 }
@@ -1940,7 +1940,7 @@ void CGisListWks::slotSyncPrjToDevices() {
   for (int n = 0; n < N; n++) {
     IGisProject* project = dynamic_cast<IGisProject*>(topLevelItem(n));
     if (project && project->isAutoSyncToDev()) {
-      syncPrjToDevices(project, keys);
+      syncPrjToDevices(project, keys, true);
     }
   }
 }
@@ -1957,12 +1957,13 @@ QSet<QString> CGisListWks::getAllDeviceKeys() const {
   return keys;
 }
 
-void CGisListWks::syncPrjToDevices(IGisProject* project, const QSet<QString>& keys) {
+void CGisListWks::syncPrjToDevices(IGisProject* project, const QSet<QString>& keys, bool automatic) {
   const int N = topLevelItemCount();
   CCanvas* canvas = CMainWindow::self().getVisibleCanvas();
   for (int n = 0; n < N; n++) {
     IDevice* device = dynamic_cast<IDevice*>(topLevelItem(n));
-    if (nullptr == device || keys.isEmpty() || !keys.contains(device->getKey())) {
+    if (nullptr == device || (automatic && !device->supportsAutoSync()) || keys.isEmpty() ||
+        !keys.contains(device->getKey())) {
       continue;
     }
     if (canvas) {
@@ -2133,7 +2134,7 @@ bool CGisListWks::event(QEvent* e) {
 
         IGisProject* project = getProjectByKey(evt->key);
         if (project) {
-          syncPrjToDevices(project, getAllDeviceKeys());
+          syncPrjToDevices(project, getAllDeviceKeys(), true);
           project->confirmPendingAutoSyncToDev();
         }
         e->accept();

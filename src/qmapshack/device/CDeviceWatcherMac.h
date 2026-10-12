@@ -21,11 +21,17 @@
 
 #include <DiskArbitration/DiskArbitration.h>
 
+#include <QMap>
+#include <QPointer>
+#include <QSet>
 #include <QStorageInfo>
 #include <QThread>
+#include <QTimer>
 #include <QtCore/QStringList>
 
 #include "device/IDeviceWatcher.h"
+
+class CDeviceGarminMtp;
 
 class CDeviceWorker : public QThread {
   Q_OBJECT
@@ -54,12 +60,20 @@ class CDeviceWatcherMac : public IDeviceWatcher {
   void slotDeviceAdded(QString dev);
   void slotDeviceRemoved(QString dev);
   void slotEndListing();
+#ifdef HAVE_LIBMTP
+  void slotUpdateMtp();
+#endif
 
  private:
   void addDevice(const QStorageInfo& storage);
 
   CDeviceWorker worker;
   QStringList deviceList;
+#ifdef HAVE_LIBMTP
+  QTimer mtpTimer;
+  QMap<QString, QPointer<CDeviceGarminMtp>> mtpDevices;
+  QSet<QString> unavailableMtpDevices;
+#endif
 };
 
 #endif  // CDEVICEWATCHERMAC_H

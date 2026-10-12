@@ -18,29 +18,44 @@
 
 #include "device/CDeviceGarminMtp.h"
 
+#ifdef HAVE_DBUS
 #include "device/CDeviceAccessGvfsMtp.h"
 #include "device/CDeviceAccessKMtp.h"
+#endif
+#include <QMessageBox>
+#include <exception>
+
+#include "CMainWindow.h"
 #include "device/CDeviceGarminArchiveMtp.h"
+#include "device/IDeviceAccess.h"
 #include "gis/CGisListWks.h"
 #include "gis/fit2/CFit2Project.h"
 #include "gis/gpx/CGpxProject.h"
 #include "helpers/CThread.h"
 #include "misc.h"
 
+CDeviceGarminMtp::CDeviceGarminMtp(IDeviceAccess* access, const QString& key, QTreeWidget* parent)
+    : QObject(parent), IDevice("", eTypeGarminMtp, key, parent), device(access) {
+  device->setParent(this);
+  setup();
+}
+
+#ifdef HAVE_DBUS
 CDeviceGarminMtp::CDeviceGarminMtp(const GVFSMount& mount, const QString& storagePath, const QString& key,
                                    QTreeWidget* parent)
-    : QObject(parent), IDevice("", eTypeGarminMtp, key, parent) {
-  device = new CDeviceAccessGvfsMtp(mount, storagePath, this);
-  setup();
-}
+    : CDeviceGarminMtp(new CDeviceAccessGvfsMtp(mount, storagePath, nullptr), key, parent) {}
 
 CDeviceGarminMtp::CDeviceGarminMtp(const QDBusObjectPath& objectPathStorage, const QString& key, QTreeWidget* parent)
-    : QObject(parent), IDevice("", eTypeGarminMtp, key, parent) {
-  device = new CDeviceAccessKMtp(objectPathStorage, this);
-  setup();
-}
+    : CDeviceGarminMtp(new CDeviceAccessKMtp(objectPathStorage, nullptr), key, parent) {}
+#endif
 
-CDeviceGarminMtp::~CDeviceGarminMtp() {
+CDeviceGarminMtp::~CDeviceGarminMtp() { cancelLoading(); }
+
+bool CDeviceGarminMtp::supportsAutoSync() const { return device->supportsAutoSync(); }
+
+void CDeviceGarminMtp::cancelLoading() {
+  loadingCancelled = true;
+  device->cancelPendingReads();
   if (threadLoadData != nullptr) {
     threadLoadData->cancel();
   }
@@ -131,6 +146,11 @@ void CDeviceGarminMtp::setup() {
   }
 
   name = QString("%1 (%2)").arg(description, device->decription());
+  if (device->isReadOnly()) {
+    name += tr(" [MTP, read-only]");
+  } else if (device->requiresUploadConfirmation()) {
+    name += tr(" [MTP, GPX upload]");
+  }
 
   qDebug() << pathGpx;
   qDebug() << pathPictures;
@@ -140,6 +160,11 @@ void CDeviceGarminMtp::setup() {
   qDebug() << pathLocations;
   qDebug() << pathAdventures;
   qDebug() << pathTcx;
+
+  if (device->supportsAsyncReads()) {
+    startAsyncLoading();
+    return;
+  }
 
   threadLoadData = new CThread([this]() {
     quint32 total = 0;
@@ -176,12 +201,48 @@ void CDeviceGarminMtp::setup() {
 }
 
 bool CDeviceGarminMtp::removeFromDevice(const QString& filename) {
+  if (device->requiresUploadConfirmation()) {
+    QMessageBox::information(CMainWindow::getBestWidgetForParent(), tr("Garmin MTP"),
+                             tr("Deletion and replacement are disabled for native MTP devices. "
+                                "Copy a new project with a different name instead."));
+    return false;
+  }
+  if (device->isReadOnly()) {
+    return false;
+  }
   qDebug() << "CDeviceGarminMtp::removeFromDevice(" << filename << ")";
   return device->removeFileFromStorage(filename);
 }
 
 void CDeviceGarminMtp::insertCopyOfProject(IGisProject* project) {
-  const QString& filename = createFileName(project, pathGpx, ".gpx");
+  if (device->isReadOnly()) {
+    qWarning() << "Cannot send projects to this read-only MTP device";
+    return;
+  }
+  QString filename = createFileName(project, pathGpx, ".gpx");
+  const bool confirmedUpload = device->requiresUploadConfirmation();
+  if (confirmedUpload) {
+    if (loadingCancelled) {
+      return;
+    }
+    QString basename = simplifiedName(project).left(120);
+    if (basename.isEmpty()) {
+      basename = "QMapShackTrack";
+    }
+    filename = QDir(pathGpx).filePath(basename + ".gpx");
+    const QPointer<CDeviceGarminMtp> lifetime(this);
+    const auto answer = QMessageBox::question(
+        CMainWindow::getBestWidgetForParent(), tr("Upload GPX to Garmin"),
+        tr("Create Garmin/%1 on %2?\n\n"
+           "The file will be downloaded again to verify its contents. Existing files will never be overwritten. "
+           "Deletion and automatic synchronization are disabled.\n\n"
+           "After upload, disconnect the Garmin to let it import the course.")
+            .arg(filename, description),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (!lifetime || answer != QMessageBox::Yes || loadingCancelled) {
+      return;
+    }
+  }
   qDebug() << "CDeviceGarminMtp::insertCopyOfProject(" << filename << ")";
 
   CGpxProject* gpx = new CGpxProject(filename, project, this);
@@ -199,11 +260,20 @@ void CDeviceGarminMtp::insertCopyOfProject(IGisProject* project) {
 
   if (!device->sendFileToStorage(filename, file)) {
     delete gpx;
+    if (confirmedUpload) {
+      QMessageBox::warning(CMainWindow::getBestWidgetForParent(), tr("Garmin upload failed"), device->lastError());
+    }
     return;
   }
 
   // move new project to top of any sub-folder/sub-device item
   reorderProjects(gpx);
+  if (confirmedUpload) {
+    QMessageBox::information(CMainWindow::getBestWidgetForParent(), tr("Garmin upload verified"),
+                             tr("Garmin/%1 was uploaded and its downloaded copy matches exactly.\n\n"
+                                "Disconnect the Garmin and check its Courses list after processing.")
+                                 .arg(filename));
+  }
 }
 
 void CDeviceGarminMtp::createProjectsFromFiles(QString subdirectory, QString extension, quint32& count,
@@ -216,7 +286,7 @@ void CDeviceGarminMtp::createProjectsFromFiles(QString subdirectory, QString ext
     }
 
     setProgress(++count, total);
-    if (!file.endsWith(extension)) {
+    if (!file.endsWith(extension, Qt::CaseInsensitive)) {
       continue;
     }
 
@@ -229,28 +299,79 @@ void CDeviceGarminMtp::createProjectsFromFiles(QString subdirectory, QString ext
           }
           openFileCheckSuccess(QIODevice::ReadWrite, tempFile);
 
-          QMutexLocker lock(&IGisItem::mutexItems);
-
-          IGisProject* project = nullptr;
-          try {
-            if (extension == "gpx") {
-              project = new CGpxProject(tempFile, d.filePath(file), this);
-            } else if (extension == "fit") {
-              project = new CFit2Project(tempFile, d.filePath(file), this);
-            }
-            if (project) {
-              if (!project->isValid()) {
-                project->destroyLater();
-              } else {
-                project->setVisibility(isVisible());
-              }
-            }
-          } catch (const QString& msg) {
-            qWarning() << msg;
-          }
+          loadProject(tempFile, d.filePath(file), extension);
         },
         Qt::BlockingQueuedConnection);
   }
+}
+
+void CDeviceGarminMtp::loadProject(QFile& file, const QString& filename, const QString& extension) {
+  QMutexLocker lock(&IGisItem::mutexItems);
+  try {
+    IGisProject* project = nullptr;
+    if (extension == "gpx") {
+      project = new CGpxProject(file, filename, this);
+    } else if (extension == "fit") {
+      project = new CFit2Project(file, filename, this);
+    }
+    if (project != nullptr) {
+      if (!project->isValid()) {
+        project->destroyLater();
+      } else {
+        project->setVisibility(isVisible());
+      }
+    }
+  } catch (const QString& error) {
+    qWarning() << error;
+  } catch (const std::exception& error) {
+    qWarning() << "Could not decode MTP project" << filename << error.what();
+  }
+}
+
+void CDeviceGarminMtp::startAsyncLoading() {
+  QSet<QString> visited;
+  const QList<QPair<QString, QString>> paths = {
+      {pathGpx, "gpx"}, {pathActivities, "fit"}, {pathCourses, "fit"}, {pathLocations, "fit"}};
+  for (const auto& path : paths) {
+    if (path.first.isEmpty() || visited.contains(path.first)) {
+      continue;
+    }
+    visited.insert(path.first);
+    const auto files = device->listFilesOnStorage(path.first);
+    for (const QString& filename : files) {
+      if (filename.endsWith("." + path.second, Qt::CaseInsensitive)) {
+        pendingFiles.append({QDir(path.first).filePath(filename), path.second});
+      }
+    }
+  }
+  asyncTotal = pendingFiles.size();
+  qInfo() << "Native MTP: loading" << asyncTotal << "Garmin projects";
+  QTimer::singleShot(0, this, &CDeviceGarminMtp::loadNextAsyncFile);
+}
+
+void CDeviceGarminMtp::loadNextAsyncFile() {
+  if (loadingCancelled) {
+    return;
+  }
+  if (pendingFiles.isEmpty()) {
+    setProgress(asyncTotal, asyncTotal);
+    qInfo() << "Native MTP: finished loading" << childCount() << "Garmin projects";
+    return;
+  }
+  const auto pending = pendingFiles.takeFirst();
+  device->readFileFromStorageAsync(pending.first, this, [this, pending](const QByteArray& contents) {
+    if (loadingCancelled) {
+      return;
+    }
+    QTemporaryFile file;
+    if (!contents.isEmpty() && file.open() && file.write(contents) == contents.size() && file.flush() && file.seek(0)) {
+      loadProject(file, pending.first, pending.second);
+    } else {
+      qWarning() << "Could not load MTP project" << pending.first;
+    }
+    setProgress(++asyncCount, asyncTotal);
+    QTimer::singleShot(0, this, &CDeviceGarminMtp::loadNextAsyncFile);
+  });
 }
 
 QString CDeviceGarminMtp::createFileName(IGisProject* project, const QString& path, const QString& suffix) const {

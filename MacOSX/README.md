@@ -60,6 +60,43 @@ and uninstall them if not needed anymore.
 
 ---
 
+## Experimental native MTP transfers
+
+Native Garmin MTP access can be enabled with the CMake option `-DUSE_LIBMTP=ON`.
+Install `libmtp` and `pkg-config` with Homebrew before configuring. The option is
+off by default and does not require GNOME, KDE, D-Bus, a filesystem mount, or a
+kernel extension.
+
+Connected Garmin devices appear in the workspace with an `[MTP, GPX upload]`
+suffix. Activities and courses are downloaded asynchronously and can be copied
+into workspace projects using the existing device interface.
+
+To export a track or route, drag its workspace project onto the device or use
+the project's `Send to Devices` action. Each upload requires confirmation.
+Only GPX files directly inside `Garmin/NewFiles` are permitted, with a 16 MiB
+upload limit and at least two valid track or route points. Filenames are limited
+to 124 ASCII letters, digits, underscores, dots and hyphens, including `.gpx`.
+Directory contents are checked afresh; existing names are rejected without
+regard to case. Uploaded files are downloaded again and checked with SHA-256
+before success is reported. Disconnect the device afterward and check its
+Courses list once it has processed the GPX.
+
+Automatic synchronization, replacement and device-side deletion are disabled
+for the native backend. Use a new workspace project with a unique name to send
+another copy of a project already on the device. A failed or interrupted transfer
+may leave an incomplete file in NewFiles; inspect it before retrying. The backend
+does not delete files automatically.
+
+USB devices are polled every five seconds. Close Garmin Express, OpenMTP and
+other MTP clients before starting QMapShack. Disconnecting cancels pending reads
+and removes the device entry. Reconnecting starts a new session and refreshes
+the directory cache. Only the first storage containing `GarminDevice.xml` is
+currently supported, with a 256 MiB limit per downloaded file.
+
+Homebrew-linked local bundles need `libmtp` and `libusb` installed at runtime.
+Standalone distributions must additionally deploy those libraries and their
+dependencies; the standard standalone bundling scripts are not yet extended.
+
 Contents of this folder _MacOSX_
 
 Folders:

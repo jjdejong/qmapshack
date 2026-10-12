@@ -163,7 +163,7 @@ class CGisListWks : public QTreeWidget {
   void showMenuItemOvl(const QPoint& p);
   void showMenuItem(const QPoint& p, const QList<IGisItem::key_t>& keysTrks, const QList<IGisItem::key_t>& keysWpts);
 
-  void syncPrjToDevices(IGisProject* project, const QSet<QString>& keys);
+  void syncPrjToDevices(IGisProject* project, const QSet<QString>& keys, bool automatic = false);
   QSet<QString> getAllDeviceKeys() const;
 
   template <typename T>

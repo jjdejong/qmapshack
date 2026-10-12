@@ -55,6 +55,7 @@ include(ConfigureChecks.cmake)
 # Feature related
 option(BUILD_QMAPSHACK      "Build QMapShack Binary"                                ON)
 option(BUILD_QMAPTOOL       "Build QMapTool Binary including command line tools"    ON)
+option(USE_LIBMTP           "Enable experimental native Garmin MTP access on macOS" OFF)
 
 if(WIN32)
 option(USE_QT6DBus          "Enable device detection via DBus"                      OFF)
@@ -215,6 +216,11 @@ endif()
 
 if(USE_QT6DBus)
     find_package(Qt6 REQUIRED COMPONENTS DBus)
+endif()
+
+if(APPLE AND USE_LIBMTP)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LIBMTP REQUIRED IMPORTED_TARGET libmtp>=1.1.21)
 endif()
 
 # Everything included. Let's finetune the mess a bit more

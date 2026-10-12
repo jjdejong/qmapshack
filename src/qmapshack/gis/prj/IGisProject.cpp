@@ -803,11 +803,14 @@ void IGisProject::umount() {
 }
 
 bool IGisProject::remove() {
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) || defined(HAVE_LIBMTP)
   CDeviceGarminMtp* mtpGarmin = dynamic_cast<CDeviceGarminMtp*>(parent());
   if (mtpGarmin != nullptr) {
     return mtpGarmin->removeFromDevice(filename);
-  } else {
+  }
+#endif
+#ifdef Q_OS_LINUX
+  {
     CDeviceGenericMtp* mtpGeneric = dynamic_cast<CDeviceGenericMtp*>(parent());
     if (mtpGeneric != nullptr) {
       return mtpGeneric->removeFromDevice(filename);

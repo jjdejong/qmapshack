@@ -23,10 +23,19 @@
 #include "device/IDevice.h"
 #include "gis/CGisListWks.h"
 
+#ifdef HAVE_LIBMTP
+#include "device/CDeviceAccessLibMtp.h"
+#include "device/CDeviceGarminMtp.h"
+#endif
+
 CDeviceWatcherMac::CDeviceWatcherMac(CGisListWks* parent) : IDeviceWatcher(parent), worker() {
   connect(&worker, &CDeviceWorker::sigDeviceAdded, this, &CDeviceWatcherMac::slotDeviceAdded);
   connect(&worker, &CDeviceWorker::sigDeviceRemoved, this, &CDeviceWatcherMac::slotDeviceRemoved);
   connect(qApp, &QApplication::aboutToQuit, this, &CDeviceWatcherMac::slotEndListing);
+#ifdef HAVE_LIBMTP
+  connect(&mtpTimer, &QTimer::timeout, this, &CDeviceWatcherMac::slotUpdateMtp);
+  mtpTimer.start(5000);
+#endif
 }
 
 void CDeviceWatcherMac::addDevice(const QStorageInfo& storage) {
@@ -44,7 +53,17 @@ void CDeviceWatcherMac::addDevice(const QStorageInfo& storage) {
   }
 }
 
-void CDeviceWatcherMac::slotEndListing() { worker.stop(); }
+void CDeviceWatcherMac::slotEndListing() {
+#ifdef HAVE_LIBMTP
+  mtpTimer.stop();
+  for (const auto& device : std::as_const(mtpDevices)) {
+    if (device != nullptr) {
+      device->cancelLoading();
+    }
+  }
+#endif
+  worker.stop();
+}
 
 // Aufruf 1s. nach instanzierung
 void CDeviceWatcherMac::slotUpdate() {
@@ -52,7 +71,48 @@ void CDeviceWatcherMac::slotUpdate() {
   for (const QStorageInfo& storage : QStorageInfo::mountedVolumes()) {
     addDevice(storage);
   }
+#ifdef HAVE_LIBMTP
+  slotUpdateMtp();
+#endif
 }
+
+#ifdef HAVE_LIBMTP
+void CDeviceWatcherMac::slotUpdateMtp() {
+  const auto detected = CDeviceAccessLibMtp::detectDevices();
+  QSet<QString> present;
+  for (const auto& info : detected) {
+    present.insert(info.key);
+    if (mtpDevices.value(info.key) != nullptr) {
+      continue;
+    }
+    auto* access = new CDeviceAccessLibMtp(info);
+    if (!access->foundValidStoragePath()) {
+      if (!unavailableMtpDevices.contains(info.key)) {
+        qWarning() << "Garmin MTP storage is unavailable. Close Garmin Express or other MTP applications.";
+      }
+      unavailableMtpDevices.insert(info.key);
+      delete access;
+      continue;
+    }
+    unavailableMtpDevices.remove(info.key);
+    mtpDevices.insert(info.key, new CDeviceGarminMtp(access, info.key, listWks));
+    emit sigChanged();
+  }
+  for (auto iterator = mtpDevices.begin(); iterator != mtpDevices.end();) {
+    if (!present.contains(iterator.key())) {
+      if (iterator.value() != nullptr) {
+        iterator.value()->cancelLoading();
+      }
+      listWks->removeDevice(iterator.key());
+      iterator = mtpDevices.erase(iterator);
+      emit sigChanged();
+    } else {
+      ++iterator;
+    }
+  }
+  unavailableMtpDevices.intersect(present);
+}
+#endif
 
 void CDeviceWatcherMac::slotDeviceAdded(QString dev) {
   // get mount point
