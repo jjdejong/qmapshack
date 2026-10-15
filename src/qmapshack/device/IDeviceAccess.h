@@ -86,10 +86,23 @@ class IDeviceAccess : public QObject {
   virtual bool supportsAsyncReads() const { return false; }
   virtual bool supportsAutoSync() const { return true; }
   virtual bool requiresUploadConfirmation() const { return false; }
-  virtual QString lastError() const { return {}; }
   virtual void cancelPendingReads() {}
   virtual void readFileFromStorageAsync(const QString& path, QObject* receiver,
                                         std::function<void(const QByteArray&)> callback);
+  /**
+   * @brief Send data to the storage without blocking the caller
+   *
+   * The default falls back to the blocking sendFileToStorage(); a backend with a worker thread overrides it.
+   *
+   * @param path       a path relative to the storage path
+   * @param data        the file contents
+   * @param receiver    both callbacks run on its thread, and not at all once it is destroyed
+   * @param progress    bytes done and total of the whole operation, including any verification
+   * @param finished    an empty string on success, else a user readable reason
+   */
+  virtual void sendFileToStorageAsync(const QString& path, const QByteArray& data, QObject* receiver,
+                                      std::function<void(quint64, quint64)> progress,
+                                      std::function<void(const QString&)> finished);
 
  protected:
   QDir dir;

@@ -55,10 +55,12 @@ class CDeviceAccessLibMtp : public IDeviceAccess {
   bool supportsAsyncReads() const override { return true; }
   bool supportsAutoSync() const override { return false; }
   bool requiresUploadConfirmation() const override { return true; }
-  QString lastError() const override { return uploadError; }
   void cancelPendingReads() override;
   void readFileFromStorageAsync(const QString& path, QObject* receiver,
                                 std::function<void(const QByteArray&)> callback) override;
+  void sendFileToStorageAsync(const QString& path, const QByteArray& data, QObject* receiver,
+                              std::function<void(quint64, quint64)> progress,
+                              std::function<void(const QString&)> finished) override;
 
  private:
   struct Session;
@@ -68,7 +70,6 @@ class CDeviceAccessLibMtp : public IDeviceAccess {
   QObject* worker;
   std::unique_ptr<Session> session;
   std::atomic_bool cancelled{false};
-  QString uploadError;
 };
 
 #endif

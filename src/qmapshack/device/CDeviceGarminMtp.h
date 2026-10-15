@@ -57,7 +57,9 @@ class CDeviceGarminMtp : public QObject, public IDevice {
   QString createFileName(IGisProject* project, const QString& path, const QString& suffix) const;
   QString simplifiedName(IGisProject* project) const;
   void reorderProjects(IGisProject* project);
-  void loadProject(QFile& file, const QString& filename, const QString& extension);
+  void uploadProject(IGisProject* project);
+  IGisProject* loadProject(QFile& file, const QString& filename, const QString& extension);
+  IGisProject* loadProject(const QByteArray& contents, const QString& filename, const QString& extension);
   void startAsyncLoading();
   void loadNextAsyncFile();
 
@@ -80,6 +82,8 @@ class CDeviceGarminMtp : public QObject, public IDevice {
   QList<QPair<QString, QString>> pendingFiles;
   quint32 asyncTotal = 0;
   quint32 asyncCount = 0;
+  quint64 uploadTotal = 0; /**< bytes of all queued uploads, twice their size to include the read-back */
+  quint64 uploadDone = 0;  /**< bytes of the uploads that have finished */
   bool loadingCancelled = false;
 };
 

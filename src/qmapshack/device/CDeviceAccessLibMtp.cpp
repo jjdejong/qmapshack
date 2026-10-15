@@ -112,6 +112,8 @@ QString validateUpload(const QString& path, const QByteArray& data) {
 }  // namespace
 
 struct CDeviceAccessLibMtp::Session {
+  using Progress = std::function<void(quint64, quint64)>;
+
   struct Entry {
     quint32 identifier = 0;
     QString name;
@@ -127,6 +129,19 @@ struct CDeviceAccessLibMtp::Session {
   std::atomic_bool* cancelled;
 
   explicit Session(std::atomic_bool* cancelled) : cancelled(cancelled) {}
+
+  struct Transfer {
+    const std::atomic_bool* cancelled;
+    const Progress& progress;
+  };
+
+  static int reportTransfer(uint64_t sent, uint64_t total, const void* context) {
+    const auto* transfer = static_cast<const Transfer*>(context);
+    if (transfer->progress) {
+      transfer->progress(sent, total);
+    }
+    return transfer->cancelled->load() ? 1 : 0;
+  }
 
   QList<Entry> entries(quint32 parent, bool* success = nullptr) {
     if (success != nullptr) {
@@ -237,7 +252,7 @@ struct CDeviceAccessLibMtp::Session {
     return result;
   }
 
-  QByteArray read(const QString& path) {
+  QByteArray read(const QString& path, const Progress& progress = {}) {
     const QString cleaned = cleanDevicePath(path);
     if (cleaned.isEmpty() || root == 0 || cancelled->load()) {
       return {};
@@ -252,10 +267,8 @@ struct CDeviceAccessLibMtp::Session {
       return {};
     }
     LIBMTP_Clear_Errorstack(device);
-    const auto progress = [](uint64_t, uint64_t, const void* context) -> int {
-      return static_cast<const std::atomic_bool*>(context)->load() ? 1 : 0;
-    };
-    if (LIBMTP_Get_File_To_File_Descriptor(device, entry.identifier, file.handle(), progress, cancelled) != 0 ||
+    const Transfer transfer{cancelled, progress};
+    if (LIBMTP_Get_File_To_File_Descriptor(device, entry.identifier, file.handle(), reportTransfer, &transfer) != 0 ||
         cancelled->load()) {
       if (!cancelled->load()) {
         qWarning() << "MTP download failed:" << path;
@@ -274,7 +287,10 @@ struct CDeviceAccessLibMtp::Session {
     return data;
   }
 
-  QString upload(const QString& path, const QByteArray& data) {
+  /**
+   * @brief Upload and read back for verification; progress covers both, so its total is twice the size
+   */
+  QString upload(const QString& path, const QByteArray& data, const Progress& progress = {}) {
     if (root == 0 || cancelled->load()) {
       return CDeviceAccessLibMtp::tr("The Garmin MTP session is unavailable or cancelled.");
     }
@@ -327,12 +343,17 @@ struct CDeviceAccessLibMtp::Session {
     metadata->filetype = LIBMTP_FILETYPE_UNKNOWN;
     metadata->parent_id = destination.identifier;
     metadata->storage_id = storage;
-    LIBMTP_Clear_Errorstack(device);
-    const auto progress = [](uint64_t, uint64_t, const void* context) -> int {
-      return static_cast<const std::atomic_bool*>(context)->load() ? 1 : 0;
+    // libmtp counts a few protocol bytes beyond the file, so clamp to keep the total exact
+    const quint64 size = data.size();
+    const Progress sending = [&progress, size](quint64 sent, quint64) {
+      if (progress) {
+        progress(qMin(sent, size), 2 * size);
+      }
     };
+    const Transfer transfer{cancelled, sending};
+    LIBMTP_Clear_Errorstack(device);
     const int result =
-        LIBMTP_Send_File_From_File_Descriptor(device, snapshot.handle(), metadata.get(), progress, cancelled);
+        LIBMTP_Send_File_From_File_Descriptor(device, snapshot.handle(), metadata.get(), reportTransfer, &transfer);
     listings.clear();
     if (result != 0 || metadata->item_id == 0 || cancelled->load()) {
       LIBMTP_Dump_Errorstack(device);
@@ -348,7 +369,11 @@ struct CDeviceAccessLibMtp::Session {
           .arg(filename);
     }
     const QByteArray expected = QCryptographicHash::hash(data, QCryptographicHash::Sha256);
-    const QByteArray received = read(path);
+    const QByteArray received = read(path, [&progress, size](quint64 readBack, quint64) {
+      if (progress) {
+        progress(size + qMin(readBack, size), 2 * size);
+      }
+    });
     if (received.size() != data.size() || QCryptographicHash::hash(received, QCryptographicHash::Sha256) != expected) {
       return CDeviceAccessLibMtp::tr(
                  "GPX read-back verification failed. Inspect Garmin/NewFiles/%1 before retrying; "
@@ -433,11 +458,10 @@ bool CDeviceAccessLibMtp::readFileFromStorage(const QString& path, QFile& file) 
 }
 
 bool CDeviceAccessLibMtp::sendFileToStorage(const QString& path, QFile& file) {
-  uploadError.clear();
   const bool wasOpen = file.isOpen();
   const qint64 position = wasOpen ? file.pos() : 0;
   if ((!wasOpen && !file.open(QIODevice::ReadOnly)) || !file.isReadable() || !file.seek(0)) {
-    uploadError = tr("Could not open the local GPX file for reading.");
+    qWarning() << "Native MTP GPX upload rejected: could not open the local GPX file";
     if (!wasOpen) {
       file.close();
     }
@@ -450,15 +474,15 @@ bool CDeviceAccessLibMtp::sendFileToStorage(const QString& path, QFile& file) {
   } else {
     file.close();
   }
-  uploadError = readFailed ? tr("Could not read the local GPX file.") : validateUpload(path, data);
-  if (uploadError.isEmpty()) {
+  QString error = readFailed ? tr("Could not read the local GPX file.") : validateUpload(path, data);
+  if (error.isEmpty()) {
     QMetaObject::invokeMethod(
-        worker, [this, path, data]() { uploadError = session->upload(path, data); }, Qt::BlockingQueuedConnection);
+        worker, [this, path, data, &error]() { error = session->upload(path, data); }, Qt::BlockingQueuedConnection);
   }
-  if (!uploadError.isEmpty()) {
-    qWarning() << "Native MTP GPX upload rejected:" << uploadError;
+  if (!error.isEmpty()) {
+    qWarning() << "Native MTP GPX upload rejected:" << error;
   }
-  return uploadError.isEmpty();
+  return error.isEmpty();
 }
 
 bool CDeviceAccessLibMtp::removeFileFromStorage(const QString&) {
@@ -501,6 +525,48 @@ void CDeviceAccessLibMtp::readFileFromStorageAsync(const QString& path, QObject*
             [this, target, callback, data]() {
               if (target && !cancelled.load()) {
                 callback(data);
+              }
+            },
+            Qt::QueuedConnection);
+      },
+      Qt::QueuedConnection);
+}
+
+void CDeviceAccessLibMtp::sendFileToStorageAsync(const QString& path, const QByteArray& data, QObject* receiver,
+                                                 std::function<void(quint64, quint64)> progress,
+                                                 std::function<void(const QString&)> finished) {
+  const QPointer<QObject> target(receiver);
+  QMetaObject::invokeMethod(
+      worker,
+      [this, path, data, target, progress = std::move(progress), finished = std::move(finished)]() {
+        // libmtp reports every chunk; forward whole percent steps only
+        int lastPercent = -1;
+        QString error = validateUpload(path, data);
+        if (error.isEmpty()) {
+          error = session->upload(path, data, [&](quint64 done, quint64 total) {
+            const int percent = total == 0 ? 100 : int(100 * done / total);
+            if (percent == lastPercent) {
+              return;
+            }
+            lastPercent = percent;
+            QMetaObject::invokeMethod(
+                this,
+                [this, target, progress, done, total]() {
+                  if (target && !cancelled.load()) {
+                    progress(done, total);
+                  }
+                },
+                Qt::QueuedConnection);
+          });
+        }
+        if (!error.isEmpty()) {
+          qWarning() << "Native MTP GPX upload rejected:" << error;
+        }
+        QMetaObject::invokeMethod(
+            this,
+            [this, target, finished, error]() {
+              if (target && !cancelled.load()) {
+                finished(error);
               }
             },
             Qt::QueuedConnection);

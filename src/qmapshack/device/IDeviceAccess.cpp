@@ -32,3 +32,15 @@ void IDeviceAccess::readFileFromStorageAsync(const QString& path, QObject* recei
   QMetaObject::invokeMethod(
       receiver, [callback = std::move(callback), contents]() { callback(contents); }, Qt::QueuedConnection);
 }
+
+void IDeviceAccess::sendFileToStorageAsync(const QString& path, const QByteArray& data, QObject* receiver,
+                                           std::function<void(quint64, quint64)>,
+                                           std::function<void(const QString&)> finished) {
+  QTemporaryFile file;
+  QString error;
+  if (!file.open() || file.write(data) != data.size() || !file.flush() || !sendFileToStorage(path, file)) {
+    error = tr("Failed to send file \"%1\" to device.").arg(path);
+  }
+  QMetaObject::invokeMethod(
+      receiver, [finished = std::move(finished), error]() { finished(error); }, Qt::QueuedConnection);
+}

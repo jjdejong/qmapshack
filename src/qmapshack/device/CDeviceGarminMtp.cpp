@@ -219,30 +219,12 @@ void CDeviceGarminMtp::insertCopyOfProject(IGisProject* project) {
     qWarning() << "Cannot send projects to this read-only MTP device";
     return;
   }
-  QString filename = createFileName(project, pathGpx, ".gpx");
-  const bool confirmedUpload = device->requiresUploadConfirmation();
-  if (confirmedUpload) {
-    if (loadingCancelled) {
-      return;
-    }
-    QString basename = simplifiedName(project).left(120);
-    if (basename.isEmpty()) {
-      basename = "QMapShackTrack";
-    }
-    filename = QDir(pathGpx).filePath(basename + ".gpx");
-    const QPointer<CDeviceGarminMtp> lifetime(this);
-    const auto answer = QMessageBox::question(
-        CMainWindow::getBestWidgetForParent(), tr("Upload GPX to Garmin"),
-        tr("Create Garmin/%1 on %2?\n\n"
-           "The file will be downloaded again to verify its contents. Existing files will never be overwritten. "
-           "Deletion and automatic synchronization are disabled.\n\n"
-           "After upload, disconnect the Garmin to let it import the course.")
-            .arg(filename, description),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (!lifetime || answer != QMessageBox::Yes || loadingCancelled) {
-      return;
-    }
+  if (device->requiresUploadConfirmation()) {
+    uploadProject(project);
+    return;
   }
+
+  const QString& filename = createFileName(project, pathGpx, ".gpx");
   qDebug() << "CDeviceGarminMtp::insertCopyOfProject(" << filename << ")";
 
   CGpxProject* gpx = new CGpxProject(filename, project, this);
@@ -260,20 +242,81 @@ void CDeviceGarminMtp::insertCopyOfProject(IGisProject* project) {
 
   if (!device->sendFileToStorage(filename, file)) {
     delete gpx;
-    if (confirmedUpload) {
-      QMessageBox::warning(CMainWindow::getBestWidgetForParent(), tr("Garmin upload failed"), device->lastError());
-    }
     return;
   }
 
   // move new project to top of any sub-folder/sub-device item
   reorderProjects(gpx);
-  if (confirmedUpload) {
-    QMessageBox::information(CMainWindow::getBestWidgetForParent(), tr("Garmin upload verified"),
-                             tr("Garmin/%1 was uploaded and its downloaded copy matches exactly.\n\n"
-                                "Disconnect the Garmin and check its Courses list after processing.")
-                                 .arg(filename));
+}
+
+void CDeviceGarminMtp::uploadProject(IGisProject* project) {
+  if (loadingCancelled) {
+    return;
   }
+  // loading and uploading share the item's progress bar
+  if (asyncCount < asyncTotal) {
+    QMessageBox::information(CMainWindow::getBestWidgetForParent(), tr("Upload GPX to Garmin"),
+                             tr("%1 is still loading its projects. Try again when it has finished.").arg(description));
+    return;
+  }
+  QString basename = simplifiedName(project).left(120);
+  if (basename.isEmpty()) {
+    basename = "QMapShackTrack";
+  }
+  const QString filename = QDir(pathGpx).filePath(basename + ".gpx");
+  const QPointer<CDeviceGarminMtp> lifetime(this);
+  const auto answer = QMessageBox::question(
+      CMainWindow::getBestWidgetForParent(), tr("Upload GPX to Garmin"),
+      tr("Create Garmin/%1 on %2?\n\n"
+         "The file will be downloaded again to verify its contents. Existing files will never be overwritten. "
+         "Deletion and automatic synchronization are disabled.\n\n"
+         "After upload, disconnect the Garmin to let it import the course.")
+          .arg(filename, description),
+      QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+  if (!lifetime || answer != QMessageBox::Yes || loadingCancelled) {
+    return;
+  }
+  qDebug() << "CDeviceGarminMtp::uploadProject(" << filename << ")";
+
+  // serialize on the GUI thread, the source project may change while the transfer runs
+  QByteArray data;
+  CGpxProject* gpx = new CGpxProject(filename, project, this);
+  QTemporaryFile file;
+  if (gpx->isValid() && file.open() && CGpxProject::saveAs(file, filename, *gpx, false) && file.open()) {
+    data = file.readAll();
+  }
+  delete gpx;
+  if (data.isEmpty()) {
+    return;
+  }
+
+  const quint64 size = 2 * quint64(data.size());
+  uploadTotal += size;
+  setProgress(quint32(uploadDone), quint32(uploadTotal));
+  device->sendFileToStorageAsync(
+      filename, data, this,
+      [this](quint64 done, quint64) { setProgress(quint32(uploadDone + done), quint32(uploadTotal)); },
+      [this, filename, data, size](const QString& error) {
+        uploadDone += size;
+        if (uploadDone == uploadTotal) {
+          uploadDone = uploadTotal = 0;
+        }
+        setProgress(quint32(uploadDone), quint32(uploadTotal));
+
+        if (!error.isEmpty()) {
+          QMessageBox::warning(CMainWindow::getBestWidgetForParent(), tr("Garmin upload failed"), error);
+          return;
+        }
+        // the uploaded bytes match the device's copy, so they stand in for reading it again
+        IGisProject* uploaded = loadProject(data, filename, "gpx");
+        if (uploaded != nullptr) {
+          reorderProjects(uploaded);
+        }
+        QMessageBox::information(CMainWindow::getBestWidgetForParent(), tr("Garmin upload verified"),
+                                 tr("Garmin/%1 was uploaded and its downloaded copy matches exactly.\n\n"
+                                    "Disconnect the Garmin and check its Courses list after processing.")
+                                     .arg(filename));
+      });
 }
 
 void CDeviceGarminMtp::createProjectsFromFiles(QString subdirectory, QString extension, quint32& count,
@@ -305,7 +348,7 @@ void CDeviceGarminMtp::createProjectsFromFiles(QString subdirectory, QString ext
   }
 }
 
-void CDeviceGarminMtp::loadProject(QFile& file, const QString& filename, const QString& extension) {
+IGisProject* CDeviceGarminMtp::loadProject(QFile& file, const QString& filename, const QString& extension) {
   QMutexLocker lock(&IGisItem::mutexItems);
   try {
     IGisProject* project = nullptr;
@@ -317,15 +360,27 @@ void CDeviceGarminMtp::loadProject(QFile& file, const QString& filename, const Q
     if (project != nullptr) {
       if (!project->isValid()) {
         project->destroyLater();
-      } else {
-        project->setVisibility(isVisible());
+        return nullptr;
       }
+      project->setVisibility(isVisible());
+      return project;
     }
   } catch (const QString& error) {
     qWarning() << error;
   } catch (const std::exception& error) {
     qWarning() << "Could not decode MTP project" << filename << error.what();
   }
+  return nullptr;
+}
+
+IGisProject* CDeviceGarminMtp::loadProject(const QByteArray& contents, const QString& filename,
+                                           const QString& extension) {
+  QTemporaryFile file;
+  if (contents.isEmpty() || !file.open() || file.write(contents) != contents.size() || !file.flush() || !file.seek(0)) {
+    qWarning() << "Could not load MTP project" << filename;
+    return nullptr;
+  }
+  return loadProject(file, filename, extension);
 }
 
 void CDeviceGarminMtp::startAsyncLoading() {
@@ -363,12 +418,7 @@ void CDeviceGarminMtp::loadNextAsyncFile() {
     if (loadingCancelled) {
       return;
     }
-    QTemporaryFile file;
-    if (!contents.isEmpty() && file.open() && file.write(contents) == contents.size() && file.flush() && file.seek(0)) {
-      loadProject(file, pending.first, pending.second);
-    } else {
-      qWarning() << "Could not load MTP project" << pending.first;
-    }
+    loadProject(contents, pending.first, pending.second);
     setProgress(++asyncCount, asyncTotal);
     QTimer::singleShot(0, this, &CDeviceGarminMtp::loadNextAsyncFile);
   });
